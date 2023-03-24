@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+
+import sys
+import yaml
+import re
+
+ignore_list = {
+    'VariableV2',
+    'IsVariableInitialized',
+    'Const',
+    'NoOp',
+    'Identity',
+    '_Send'
+}
+
+def ShortenRname(rname, rle):
+    if '/' not in rname:
+        return rname
+
+    return '/'.join(rname.split('/')[:-rle])
+
+def PrintRecord(i, yd, stats):
+    hw_eff = yd['fp32'] / (yd['fp32'] + yd['non-fp32'])
+
+    print(
+        i,
+        yd['rname'],
+        yd['opname'],
+        yd['meta'],
+        yd['total'],
+        yd['non-fp32'],
+        yd['fp32'],
+        stats.total,
+        stats.non_fp32_total,
+        stats.fp32_total,
+        hw_eff)
+
+def ReadRecords(filename, no_barrier=False, rle_depth=0):
+    with open(filename) as f:
+        barrier_found = no_barrier
+        while not barrier_found:
+            line = next(f)
+            barrier_found = 'Barrier' in line
+
+        prev = None
+        for (i, line) in enumerate(f):
+            if 'rid: 0' in line:
+                print(i, line)
+                yd = yaml.unsafe_load(line)[0]
+                if yd['opname'] in ignore_list or yd['fp32'] == 0:
+                    continue
+
+                yd['rname'] = ShortenRname(yd['rname'], rle_depth)
+
+                if prev is not None and prev['rname'] == yd['rname'] and '/' in yd['rname']:
+                    prev['total'] += yd['total']
+                    prev['non-fp32'] += yd['non-fp32']
+                    prev['fp32'] += yd['fp32']
+                    prev['opname'] = 'combined'
+                else:
+                    if prev is not None:
+                        yield prev
+                    prev = yd
+
+            elif 'rid: 3' in line:
+                if prev is not None:
+                    yield prev
+                yield yaml.unsafe_load(line)[0]
+
+        if prev is not None:
+            yield prev
+
+class Stats():
+    def __init__(self):
+        self.total = 0
+        self.non_fp32_total = 0
+        self.fp32_total = 0
+
+if len(sys.argv) > 2:
+    no_barrier = sys.argv[1] == '-n'
+    filename = sys.argv[2]
+else:
+    no_barrier = False
+    filename = sys.argv[1]
+
+rle = 0
+stats = Stats()
+exec_order = 1
+
+for (i, r) in enumerate(ReadRecords(filename, no_barrier, rle)):
+    stats.total += r['total']
+    stats.non_fp32_total += r['non-fp32']
+    stats.fp32_total += r['fp32']
+    PrintRecord(i, r, stats)
